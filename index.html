@@ -1,0 +1,337 @@
+<!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><title>nico Colony Prototype 0.0.20</title><style>
+*{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#160e12;color:#fff;font-family:system-ui,sans-serif}canvas{width:100%;height:100%;display:block;background:#2a1717}.hud{position:fixed;left:14px;top:14px;background:#151018cc;border:1px solid #ffffff35;border-radius:12px;padding:10px 12px;backdrop-filter:blur(6px);font-size:13px;pointer-events:none}.hud b{color:#ffd1e4}.tip{position:fixed;right:14px;top:14px;text-align:right;font-size:12px;color:#f6dce6;text-shadow:0 1px 2px #000}.bar{position:fixed;left:50%;bottom:18px;transform:translateX(-50%);display:flex;gap:6px;padding:7px;background:#151018dd;border:1px solid #ffffff35;border-radius:14px}.bar button{color:white;background:#38242d;border:1px solid #ffffff30;border-radius:9px;padding:9px 12px;cursor:pointer}.bar button.on{outline:2px solid #ffb4d0;background:#55313f}.panel{position:fixed;left:14px;bottom:14px;min-width:220px;background:#151018e8;border:1px solid #ffffff35;border-radius:12px;padding:10px 12px;font-size:13px;display:none}.panel.show{display:block}.panel strong{color:#ffd1e4}.brand{font-size:15px;font-weight:800;margin-bottom:3px}.subbar{position:fixed;left:50%;bottom:72px;transform:translateX(-50%);display:none;gap:6px;padding:7px;background:#151018e8;border:1px solid #ffffff35;border-radius:12px}.subbar.show{display:flex}.subbar button{color:white;background:#38242d;border:1px solid #ffffff30;border-radius:8px;padding:8px 11px;cursor:pointer}.subbar button.on{outline:2px solid #ffb4d0;background:#55313f}
+.stock{position:fixed;left:14px;top:100px;width:200px;padding:10px 12px;background:#151018df;border:1px solid #ffffff35;border-radius:10px;font-size:13px;pointer-events:none}.stock small{display:block;color:#c6abb6;margin-top:6px}.zones{position:fixed;right:14px;top:100px;width:270px;max-height:65vh;overflow:auto;background:#151018ed;border:1px solid #ffffff35;border-radius:12px;padding:12px;font-size:13px;display:none}.zones.show{display:block}.zones label{display:block;margin:7px 0}.zones input[type=text]{width:135px;background:#38242d;color:#fff;border:1px solid #ffffff35;padding:4px}.zones button,.panel button{background:#38242d;color:white;border:1px solid #ffffff35;border-radius:5px;padding:5px;cursor:pointer}.zones small{color:#d9b7c7;display:block;margin-bottom:9px}.subbar{max-width:95vw;flex-wrap:wrap;justify-content:center}.panel{max-width:250px}.tip{max-width:60vw}@media(max-width:650px){.tip{display:none}.stock{width:165px}.zones{width:225px}.panel{bottom:145px}.bar button{padding:9px}.hud{font-size:11px}}
+</style></head><body><canvas id="c"></canvas><div class="hud"><div class="brand">nico Colony <b>Prototype 0.0.20</b></div><div id="status"></div><button id="soundToggle" style="pointer-events:auto;background:#38242d;color:white;border:1px solid #ffffff35;border-radius:5px;margin-top:4px">音：ON</button></div><div class="tip">WASD / 矢印：カメラ　ホイール：ズーム<br>中/右ドラッグ：カメラ　左クリック：選択 / 作業指定<br>Space：一時停止　1/2/3：速度</div><div class="panel" id="panel"><strong>nico</strong><div id="nicoState">待機中</div><div>選択中：nico</div><button id="residentZones">行動範囲を設定</button></div><div class="subbar" id="buildBar"><button data-tool="wall">壁</button><button data-tool="floor">床</button><button data-tool="door">扉</button><button data-tool="bed">ベッド</button><button data-tool="storage">収納</button></div><div class="subbar" id="orderBar"><button data-tool="mine">採掘</button><button data-tool="cut">伐採</button><button data-tool="erase">撤去</button></div><div class="stock"><strong>コロニー物資</strong><div id="inventory"><div style="display:flex;justify-content:space-between"><span>グラド</span><span id="stock0">0</span></div><div style="display:flex;justify-content:space-between"><span>ゼルヴァ</span><span id="stock1">0</span></div></div><small>ゾーン内・収納内の物資を集計</small></div><div class="zones" id="zonesPanel"></div><div class="subbar" id="zoneBar"><button data-tool="stockzone">保管ゾーン</button><button data-tool="areazone">行動エリア</button><button id="manageZones">ゾーン管理</button></div><div class="bar" id="bar"><button data-menu="select" class="on">選択</button><button data-menu="orders">命令</button><button data-menu="build">建築</button><button data-menu="zones">ゾーン</button></div><script>
+const GAME_VERSION="0.0.20";
+const TILE=32,W=160,H=120,CHUNK=16;const canvas=document.getElementById('c'),ctx=canvas.getContext('2d',{alpha:false});const DPR=Math.min(devicePixelRatio||1,2);function resize(){canvas.width=innerWidth*DPR;canvas.height=innerHeight*DPR;ctx.setTransform(DPR,0,0,DPR,0,0)}addEventListener('resize',resize);resize();
+const ground=new Uint8Array(W*H),build=new Uint8Array(W*H),floors=new Uint8Array(W*H),dirty=new Set(),chunks=new Map();const jobs=[];const natural=new Uint8Array(W*H),zones=[],drops=[],containers=new Map(),doors=new Map();let nextZoneId=1,zoneDrag=null,zoneEditor=false,simTime=0,retryAt=0;const idx=(x,y)=>y*W+x,mark=(x,y)=>dirty.add(((x/CHUNK)|0)+','+((y/CHUNK)|0));
+// v0.0.11: ワールドはシードから生成。地形を1タイルずつ抽選せず、低周波フィールドから大きな地質帯を作る。
+const WORLD_SEED=0x4e49434f;
+function worldHash(x,y,s=0){let n=(Math.imul(x|0,374761393)^Math.imul(y|0,668265263)^Math.imul((WORLD_SEED+s)|0,1597334677))>>>0;n=Math.imul(n^(n>>>13),1274126177)>>>0;return (n^(n>>>16))>>>0}
+function fieldNoise(x,y,scale,seed=0){const fx=x/scale,fy=y/scale,x0=Math.floor(fx),y0=Math.floor(fy),tx=fx-x0,ty=fy-y0,u=tx*tx*(3-2*tx),v=ty*ty*(3-2*ty),r=(ix,iy)=>(worldHash(ix,iy,seed)&65535)/65535;const a=r(x0,y0),b=r(x0+1,y0),c=r(x0,y0+1),d=r(x0+1,y0+1);return (a*(1-u)+b*u)*(1-v)+(c*(1-u)+d*u)*v}
+function terrainAt(x,y){const macro=fieldNoise(x,y,34,1)*.68+fieldNoise(x,y,15,2)*.32,rock=fieldNoise(x,y,21,3),wet=fieldNoise(x,y,27,4);if(wet<.16)return 7;if(wet<.24)return 6;if(macro<.34)return rock>.58?5:4;if(macro>.72)return rock>.58?3:1;return rock>.70?2:0}
+for(let y=0;y<H;y++)for(let x=0;x<W;x++){ground[idx(x,y)]=terrainAt(x,y);mark(x,y)}
+const nico={x:80,y:60,rx:80*TILE,ry:60*TILE,dir:'S',moving:false,path:[],selected:false,state:'待機中',job:null,work:0,moveSpeed:44,allowedZones:null,carry:null,walkDistance:0};let cam={x:nico.rx+16,y:nico.ry+16,zoom:1.35},tool='select',menu='select',paused=false,speed=1,lastStep=0;const atlas=new Image();atlas.src='Resources/characters.webp';const resourceAtlas=new Image();resourceAtlas.src='Resources/resources.webp';const terrainV2=new Image();terrainV2.src='Resources/terrain.webp';const buildingAtlas=new Image();buildingAtlas.src='Resources/buildings.webp';const terrainPatterns=[];function rebuildTerrainPatterns(){terrainPatterns.length=0;if(!terrainV2.complete||!terrainV2.naturalWidth)return;for(let row=0;row<2;row++)for(let k=0;k<8;k++){let c=document.createElement('canvas');c.width=c.height=114;let g=c.getContext('2d');g.clearRect(0,0,114,114);/* 元セル外周の暗い枠を捨て、素材中心部だけを使う */g.drawImage(terrainV2,k*128+7,row*128+7,114,114,0,0,114,114);/* 元解像度を保ったまま端を透明化して重ね描き可能な地表パッチにする */g.globalCompositeOperation='destination-in';let grad=g.createRadialGradient(57,57,42,57,57,57);grad.addColorStop(0,'rgba(255,255,255,1)');grad.addColorStop(.6,'rgba(255,255,255,.96)');grad.addColorStop(1,'rgba(255,255,255,0)');g.fillStyle=grad;g.fillRect(0,0,114,114);g.globalCompositeOperation='source-over';terrainPatterns[row*8+k]=c}dirty.clear();for(let cy=0;cy<Math.ceil(H/CHUNK);cy++)for(let cx=0;cx<Math.ceil(W/CHUNK);cx++)dirty.add(cx+','+cy)}terrainV2.onload=rebuildTerrainPatterns;buildingAtlas.onload=()=>{rebuildWallMaterials();rebuildFloorMaterial();for(let cy=0;cy<Math.ceil(H/CHUNK);cy++)for(let cx=0;cx<Math.ceil(W/CHUNK);cx++)dirty.add(cx+','+cy)};
+// Physical resources and zones. Future residents keep their own movement speed and allowed-zone ids.
+// Generated-in-engine effects keep the product file set unchanged; activation follows a user gesture.
+let audio=null,master=null,soundEnabled=true,noiseBuffer=null;const audioStats={foot:0,door:0,close:0,button:0,mine:0,cut:0,build:0};let lastFootAudio=0;
+function initAudio(){if(!audio){const AC=window.AudioContext||window.webkitAudioContext;if(!AC)return;audio=new AC();master=audio.createGain();master.gain.value=soundEnabled?.24:0;master.connect(audio.destination);noiseBuffer=audio.createBuffer(1,audio.sampleRate,audio.sampleRate);const data=noiseBuffer.getChannelData(0);for(let i=0;i<data.length;i++)data[i]=Math.random()*2-1}if(audio.state==='suspended')audio.resume()}
+function sound(kind){if(!audio||audio.state!=='running'||!soundEnabled)return;if(kind==='foot'&&audio.currentTime-lastFootAudio<.12)return;if(kind==='foot')lastFootAudio=audio.currentTime;audioStats[kind]=(audioStats[kind]||0)+1;const now=audio.currentTime;
+ const noise=(duration,frequency,level,band='lowpass')=>{const src=audio.createBufferSource(),filter=audio.createBiquadFilter(),gain=audio.createGain();src.buffer=noiseBuffer;src.playbackRate.value=.8+Math.random()*.3;filter.type=band;filter.frequency.value=frequency;filter.Q.value=1.1;gain.gain.setValueAtTime(level,now);gain.gain.exponentialRampToValueAtTime(.001,now+duration);src.connect(filter);filter.connect(gain);gain.connect(master);src.start(now,Math.random()*.4);src.stop(now+duration);src.onended=()=>{src.disconnect();filter.disconnect();gain.disconnect()}};
+ const tone=(freq,duration,level,type='sine',end=freq)=>{const osc=audio.createOscillator(),gain=audio.createGain();osc.type=type;osc.frequency.setValueAtTime(freq,now);osc.frequency.exponentialRampToValueAtTime(end,now+duration);gain.gain.setValueAtTime(level,now);gain.gain.exponentialRampToValueAtTime(.001,now+duration);osc.connect(gain);gain.connect(master);osc.start(now);osc.stop(now+duration);osc.onended=()=>{osc.disconnect();gain.disconnect()}};
+ if(kind==='foot'){noise(.095,1200,.28);tone(95,.075,.18,'sine',55)}else if(kind==='button'){noise(.025,3000,.10);tone(740,.045,.12,'sine',480)}else if(kind==='mine'){noise(.06,2800,.6,'highpass');tone(1870,.23,.32,'sine',1550);tone(3220,.15,.12)}else if(kind==='cut'){noise(.14,950,.65);tone(180,.16,.36,'triangle',65)}else if(kind==='door'||kind==='close'){noise(.35,650,.25,'bandpass');tone(kind==='door'?170:110,.42,.14,'triangle',kind==='door'?90:180);tone(75,.09,.23)}else{noise(.1,1600,.36);tone(340,.12,.21,'triangle',200)}}
+addEventListener('pointerdown',initAudio,{capture:true});addEventListener('keydown',initAudio,{capture:true});document.addEventListener('click',e=>{if(e.target.closest('button'))sound('button')});document.getElementById('soundToggle').onclick=()=>{soundEnabled=!soundEnabled;if(master)master.gain.value=soundEnabled?.24:0;document.getElementById('soundToggle').textContent='音：'+(soundEnabled?'ON':'OFF')};
+const RESOURCE_NAMES=['グラド','ゼルヴァ'];const resources=[],resourceCells=new Map();
+function hash2(x,y){let n=(x*374761393+y*668265263)>>>0;n=(n^(n>>13))*1274126177>>>0;return(n^(n>>16))>>>0}
+function resourceAt(x,y){return resourceCells.get(idx(x,y))}
+function inZone(z,x,y){return x>=z.x0&&x<=z.x1&&y>=z.y0&&y<=z.y1}
+function allowed(x,y,resident=nico){return resident.allowedZones===null||zones.some(z=>resident.allowedZones.includes(z.id)&&inZone(z,x,y))}
+function addZone(kind,x0,y0,x1,y1,source=null){const z={id:nextZoneId++,kind,x0:Math.max(0,Math.min(x0,x1)),y0:Math.max(0,Math.min(y0,y1)),x1:Math.min(W-1,Math.max(x0,x1)),y1:Math.min(H-1,Math.max(y0,y1)),source};z.name=(kind==='colony'?'コロニー':kind==='stock'?'保管':'行動エリア')+' '+z.id;zones.push(z);refreshZones();return z}
+function addColony(x,y){if(!zones.some(z=>z.source===idx(x,y)))addZone('colony',x-1,y-1,x+1,y+1,idx(x,y))}
+function removeColony(x,y){const i=zones.findIndex(z=>z.source===idx(x,y));if(i>=0)zones.splice(i,1);refreshZones()}
+function removeZone(id){const i=zones.findIndex(z=>z.id===id);if(i<0||zones[i].kind==='colony')return;zones.splice(i,1);refreshZones();cancelRoute()}
+function refreshZones(){if(!zoneEditor)return;const panel=document.getElementById('zonesPanel');panel.replaceChildren();const title=document.createElement('strong');title.textContent='ゾーン / nicoの行動範囲';panel.append(title);const info=document.createElement('small');info.textContent='チェックした範囲内で移動・作業。保管ゾーンはドラッグで指定。建築物の周囲3×3は自動生成。';panel.append(info);const all=document.createElement('label'),cb=document.createElement('input');cb.type='checkbox';cb.checked=nico.allowedZones===null;cb.onchange=()=>{nico.allowedZones=cb.checked?null:[];cancelRoute();refreshZones()};all.append(cb,' 全域で行動');panel.append(all);for(const z of zones){const row=document.createElement('label'),check=document.createElement('input');check.type='checkbox';check.checked=nico.allowedZones===null||nico.allowedZones.includes(z.id);check.disabled=nico.allowedZones===null;check.onchange=()=>{nico.allowedZones=check.checked?[...nico.allowedZones,z.id]:nico.allowedZones.filter(id=>id!==z.id);cancelRoute()};const name=document.createElement('input');name.type='text';name.value=z.name;name.onchange=()=>{z.name=name.value.trim()||z.name};row.append(check,name);if(z.kind!=='colony'){const del=document.createElement('button');del.textContent='削除';del.onclick=()=>removeZone(z.id);row.append(del)}panel.append(row)}const close=document.createElement('button');close.textContent='閉じる';close.onclick=()=>{zoneEditor=false;panel.classList.remove('show')};panel.append(close)}
+function openZones(){zoneEditor=true;document.getElementById('zonesPanel').classList.add('show');refreshZones()}
+function cancelRoute(){nico.path=[];nico.job=null;nico.moving=false;retryAt=0;nico.state='行動範囲を変更'}
+function generateResources(){for(let y=0;y<H;y++)for(let x=0;x<W;x++){if(Math.hypot(x-80,y-60)<5||ground[idx(x,y)]>=6)continue;const rock=fieldNoise(x,y,14,71)*.65+fieldNoise(x,y,5,72)*.35;if(rock>.65){natural[idx(x,y)]=1;build[idx(x,y)]=2;mark(x,y)}}for(let y=2;y<H-2;y+=3)for(let x=2;x<W-2;x+=3){const xx=x+(worldHash(x,y,73)%2),yy=y+(worldHash(x,y,74)%2);if(Math.hypot(xx-80,yy-60)<5||build[idx(xx,yy)]||ground[idx(xx,yy)]>=6||fieldNoise(xx,yy,17,75)<.5)continue;const r={x:xx,y:yy,type:0};resources.push(r);resourceCells.set(idx(xx,yy),r)}}generateResources();
+function jobAt(x,y){return jobs.find(j=>j.x===x&&j.y===y)}
+function passable(x,y){return x>=0&&y>=0&&x<W&&y<H&&ground[idx(x,y)]!==7&&build[idx(x,y)]!==2&&build[idx(x,y)]!==5&&!resourceAt(x,y)&&allowed(x,y)}
+function pathfind(sx,sy,tx,ty){if(!passable(tx,ty))return[];const q=[[sx,sy]],prev=new Int32Array(W*H);prev.fill(-2);prev[idx(sx,sy)]=-1;let qi=0;while(qi<q.length){const[x,y]=q[qi++];if(x===tx&&y===ty)break;for(const[dx,dy]of[[1,0],[-1,0],[0,1],[0,-1]]){const nx=x+dx,ny=y+dy;if(!passable(nx,ny))continue;const ni=idx(nx,ny);if(prev[ni]!==-2)continue;prev[ni]=idx(x,y);q.push([nx,ny])}}if(prev[idx(tx,ty)]===-2)return[];let out=[],cur=idx(tx,ty);while(cur!==idx(sx,sy)){out.push([cur%W,(cur/W)|0]);cur=prev[cur]}return out.reverse()}
+function reachablePath(x,y){const p=pathfind(nico.x,nico.y,x,y);return p.length||(nico.x===x&&nico.y===y&&passable(x,y))?p:null}
+function orderMove(x,y){const p=reachablePath(x,y);if(!p){nico.state='指定範囲内からは行けない';return}nico.job=null;nico.path=p;nico.state=p.length?'移動中':'待機中';retryAt=simTime+1}
+function adjacentWorkTile(j){if(!allowed(j.x,j.y))return null;let best=null;for(const[dx,dy]of[[0,1],[1,0],[-1,0],[0,-1]]){const x=j.x+dx,y=j.y+dy,p=reachablePath(x,y);if(p&&(!best||p.length<best.path.length))best={tile:[x,y],path:p}}return best}
+function queueJob(type,x,y,buildType=0){if(jobAt(x,y))return;if(type==='build'&&(resourceAt(x,y)||ground[idx(x,y)]===7||(buildType===1?(floors[idx(x,y)]||build[idx(x,y)]===2):build[idx(x,y)])))return;if(type==='mine'&&build[idx(x,y)]!==2)return;if(type==='cut'&&!resourceAt(x,y))return;if(type==='remove'&&!build[idx(x,y)])return;jobs.push({type,x,y,buildType,progress:0,need:type==='build'?3:type==='cut'?6:5});retryAt=0;nico.state='作業予定を指定'}
+function addDrop(x,y,type,qty){const d=drops.find(d=>d.x===x&&d.y===y&&d.type===type);if(d)d.qty+=qty;else drops.push({x,y,type,qty});retryAt=0}
+function routeMap(){const prev=new Int32Array(W*H),dist=new Int32Array(W*H),queue=new Int32Array(W*H);prev.fill(-2);dist.fill(-1);let head=0,tail=1;const start=idx(nico.x,nico.y);queue[0]=start;prev[start]=-1;dist[start]=0;while(head<tail){const k=queue[head++],x=k%W,y=(k/W)|0;for(const[dx,dy]of[[1,0],[-1,0],[0,1],[0,-1]]){const nx=x+dx,ny=y+dy;if(!passable(nx,ny))continue;const ni=idx(nx,ny);if(prev[ni]!==-2)continue;prev[ni]=k;dist[ni]=dist[k]+1;queue[tail++]=ni}}return {dist,path(k){let path=[];while(k!==start){path.push([k%W,(k/W)|0]);k=prev[k]}return path.reverse()}}}
+function storageTarget(){const routes=routeMap();let best=null;const consider=(x,y,priority,container)=>{const k=idx(x,y);if(!passable(x,y)||routes.dist[k]<0)return;const score=priority*W*H+routes.dist[k];if(!best||score<best.score)best={x,y,container,priority,score,k}};for(const[k,c]of containers){const x=k%W,y=(k/W)|0;if(!allowed(x,y))continue;for(const[dx,dy]of[[0,1],[1,0],[-1,0],[0,-1]]){const xx=x+dx,yy=y+dy;const before=best;consider(xx,yy,0,k);if(best!==before){best.x=x;best.y=y}}}for(const z of zones){if(z.kind==='area')continue;for(let y=z.y0;y<=z.y1;y++)for(let x=z.x0;x<=z.x1;x++)consider(x,y,z.kind==='stock'?1:2)}if(best){best.path=routes.path(best.k);delete best.k;delete best.score}return best}
+function storedDrop(d,target){if(target&&target.container!==undefined)return false;const hasStock=zones.some(z=>z.kind==='stock');return zones.some(z=>(hasStock?z.kind==='stock':z.kind==='colony')&&inZone(z,d.x,d.y))}
+function acquireJob(){if(nico.job||nico.path.length||simTime<retryAt)return;retryAt=simTime+1;if(nico.carry){const target=storageTarget();if(!target){nico.state='保管先・行動範囲を指定してね';return}nico.job={type:'deliver',...target,progress:0,need:.4};nico.path=target.path;return}for(const j of jobs){const a=adjacentWorkTile(j);if(!a)continue;nico.job=j;nico.path=a.path;nico.state=j.type==='build'?'建築地点へ移動':'作業地点へ移動';return}if(!drops.length){nico.state='待機中';return}const destination=storageTarget();if(!destination){nico.state='待機中';return}for(const d of drops){if(storedDrop(d,destination)||!allowed(d.x,d.y))continue;const p=reachablePath(d.x,d.y);if(!p)continue;nico.job={type:'pickup',x:d.x,y:d.y,drop:d,progress:0,need:.4};nico.path=p;nico.state='資材を回収';return}nico.state='待機中'}
+function finishJob(j){if(j.type==='build'){if(j.buildType===1)floors[idx(j.x,j.y)]=1;else{build[idx(j.x,j.y)]=j.buildType;addColony(j.x,j.y);if(j.buildType===5)containers.set(idx(j.x,j.y),[0,0]);if(j.buildType===3)doors.set(idx(j.x,j.y),{progress:0,hold:0})}mark(j.x,j.y)}else if(j.type==='mine'){build[idx(j.x,j.y)]=0;natural[idx(j.x,j.y)]=0;removeColony(j.x,j.y);addDrop(j.x,j.y,1,8);mark(j.x,j.y)}else if(j.type==='cut'){const r=resourceAt(j.x,j.y);if(r){resourceCells.delete(idx(j.x,j.y));resources.splice(resources.indexOf(r),1);addDrop(j.x,j.y,0,8)}}else if(j.type==='remove'){const k=idx(j.x,j.y),c=containers.get(k);if(c)for(let t=0;t<2;t++)if(c[t])addDrop(j.x,j.y,t,c[t]);containers.delete(k);doors.delete(k);build[k]=0;removeColony(j.x,j.y);mark(j.x,j.y)}else if(j.type==='pickup'){if(drops.includes(j.drop)){nico.carry={type:j.drop.type,qty:j.drop.qty};drops.splice(drops.indexOf(j.drop),1)}}else if(j.type==='deliver'){if(nico.carry){const c=containers.get(j.container);if(c)c[nico.carry.type]+=nico.carry.qty;else addDrop(j.x,j.y,nico.carry.type,nico.carry.qty);nico.carry=null}}const i=jobs.indexOf(j);if(i>=0)jobs.splice(i,1);nico.job=null;nico.state='待機中';retryAt=0}
+function updateDoors(dt){for(const[k,d]of doors){const x=k%W,y=(k/W)|0,next=nico.path[0],occupying=Math.abs(nico.rx-x*TILE)<TILE*.95&&Math.abs(nico.ry-y*TILE)<TILE*.95,requested=(next&&next[0]===x&&next[1]===y)||occupying;if(requested){if(d.progress===0)sound('door');d.hold=1}else{const prior=d.hold;d.hold=Math.max(0,d.hold-dt);if(prior>0&&d.hold===0&&d.progress>0)sound('close')}d.progress=Math.max(0,Math.min(1,d.progress+(d.hold>0?dt/.65:-dt/.45)))}}
+function stepNico(dt){nico.moving=false;updateDoors(dt);if(!nico.path.length&&Math.hypot(nico.rx-nico.x*TILE,nico.ry-nico.y*TILE)>.001){nico.path=[[nico.x,nico.y]];return}if(nico.path.length){let budget=nico.moveSpeed*dt;while(budget>0&&nico.path.length){const[nx,ny]=nico.path[0];if(!passable(nx,ny)){cancelRoute();return}if(build[idx(nx,ny)]===3){const d=doors.get(idx(nx,ny));if(!d||d.progress<1){nico.state='扉が開くのを待つ';return}}const dx=nx*TILE-nico.rx,dy=ny*TILE-nico.ry,len=Math.hypot(dx,dy),dist=Math.min(len,budget);nico.dir=Math.abs(dx)>Math.abs(dy)?(dx<0?'W':'E'):(dy<0?'N':'S');if(len){nico.rx+=dx/len*dist;nico.ry+=dy/len*dist;const beat=Math.floor(nico.walkDistance/16);nico.walkDistance+=dist;if(Math.floor(nico.walkDistance/16)>beat)sound('foot');nico.moving=true}budget-=dist;if(len<=dist+.00001){nico.x=nx;nico.y=ny;nico.path.shift()}else break}nico.state=nico.carry?'資材を運搬中':'移動中';return}if(!nico.job){acquireJob();return}const j=nico.job,atOwn=j.type==='pickup'||(j.type==='deliver'&&j.container===undefined);if(!allowed(j.x,j.y)||(atOwn?(nico.x!==j.x||nico.y!==j.y):Math.abs(nico.x-j.x)+Math.abs(nico.y-j.y)!==1)){nico.job=null;retryAt=0;return}nico.dir=j.x<nico.x?'W':j.x>nico.x?'E':j.y<nico.y?'N':'S';const beat=Math.floor(j.progress/.7);j.progress+=dt;if(Math.floor(j.progress/.7)>beat&&['mine','cut','build','remove'].includes(j.type)){sound(j.type==='remove'?'build':j.type);nico.hitUntil=simTime+.16}nico.state=({build:'建築',mine:'採掘',cut:'伐採',remove:'撤去',pickup:'回収',deliver:'保管'}[j.type])+'中 '+Math.min(100,Math.round(j.progress/j.need*100))+'%';if(j.progress>=j.need)finishJob(j)}
+function inventoryCounts(){const counts=[0,0];for(const d of drops)if(zones.some(z=>inZone(z,d.x,d.y)))counts[d.type]+=d.qty;for(const[k,c]of containers)if(zones.some(z=>inZone(z,k%W,(k/W)|0)))for(let t=0;t<2;t++)counts[t]+=c[t];return counts}
+const keys=new Set();addEventListener('keydown',e=>{let k=e.key.toLowerCase();if(['w','a','s','d','arrowup','arrowdown','arrowleft','arrowright'].includes(k)){keys.add(k);e.preventDefault()}if(e.code==='Space'){paused=!paused;e.preventDefault()}if(['1','2','3'].includes(e.key))speed=+e.key});addEventListener('keyup',e=>keys.delete(e.key.toLowerCase()));
+function setMenu(m){menu=m;tool=m==='select'?'select':null;document.querySelectorAll('#bar button').forEach(b=>b.classList.toggle('on',b.dataset.menu===m));document.getElementById('buildBar').classList.toggle('show',m==='build');document.getElementById('orderBar').classList.toggle('show',m==='orders');document.getElementById('zoneBar').classList.toggle('show',m==='zones');document.querySelectorAll('.subbar button').forEach(b=>b.classList.remove('on'))}
+document.querySelectorAll('#bar button').forEach(b=>b.onclick=()=>setMenu(b.dataset.menu));document.querySelectorAll('.subbar button[data-tool]').forEach(b=>b.onclick=()=>{tool=b.dataset.tool;document.querySelectorAll('.subbar button').forEach(x=>x.classList.toggle('on',x===b))});let drag=false,last=null;canvas.addEventListener('contextmenu',e=>e.preventDefault());canvas.addEventListener('pointerdown',e=>{if(e.button===1||e.button===2){drag=true;last=[e.clientX,e.clientY];canvas.setPointerCapture(e.pointerId);return}if(e.button!==0)return;let p=screenToTile(e.clientX,e.clientY);if(!p)return;let[x,y]=p;if(tool==='stockzone'||tool==='areazone'){zoneDrag={x,y,ex:x,ey:y,kind:tool==='stockzone'?'stock':'area'};canvas.setPointerCapture(e.pointerId);return}if(tool==='select'){const wx=(e.clientX-innerWidth/2)/cam.zoom+cam.x,wy=(e.clientY-innerHeight/2)/cam.zoom+cam.y;if(Math.abs(wx-(nico.rx+16))<18&&wy>nico.ry-9&&wy<nico.ry+35){nico.selected=true;nico.state=nico.path.length?'移動中':'待機中'}else if(nico.selected)orderMove(x,y);else nico.selected=false;return}nico.selected=false;if(tool==='wall')queueJob('build',x,y,2);else if(tool==='floor')queueJob('build',x,y,1);else if(tool==='door')queueJob('build',x,y,3);else if(tool==='bed')queueJob('build',x,y,4);else if(tool==='storage')queueJob('build',x,y,5);else if(tool==='cut')queueJob('cut',x,y);else if(tool==='mine')queueJob('mine',x,y);else if(tool==='erase'){let j=jobAt(x,y);if(j){jobs.splice(jobs.indexOf(j),1);if(nico.job===j)cancelRoute()}else if(build[idx(x,y)])queueJob('remove',x,y)}});canvas.addEventListener('pointermove' ,e=>{if(zoneDrag){const p=screenToTile(e.clientX,e.clientY);if(p){zoneDrag.ex=p[0];zoneDrag.ey=p[1]}}if(drag&&last){cam.x-=(e.clientX-last[0])/cam.zoom;cam.y-=(e.clientY-last[1])/cam.zoom;last=[e.clientX,e.clientY]}});canvas.addEventListener('pointerup',()=>{if(zoneDrag){addZone(zoneDrag.kind,zoneDrag.x,zoneDrag.y,zoneDrag.ex,zoneDrag.ey);zoneDrag=null;retryAt=0}drag=false;last=null});canvas.addEventListener('wheel',e=>{e.preventDefault();cam.zoom=Math.max(.35,Math.min(2.5,cam.zoom*Math.exp(-e.deltaY*.001)))},{passive:false});
+document.getElementById('residentZones').onclick=openZones;document.getElementById('manageZones').onclick=openZones;
+function screenToTile(sx,sy){let wx=(sx-innerWidth/2)/cam.zoom+cam.x,wy=(sy-innerHeight/2)/cam.zoom+cam.y,x=Math.floor(wx/TILE),y=Math.floor(wy/TILE);return x>=0&&y>=0&&x<W&&y<H?[x,y]:null}
+const TERRAIN_TINT=['#743b2e','#6f3429','#5d392f','#30252a','#4a303c','#44342f','#493946','#15192a'];
+// Generation-2 terrain renderer. Simulation stays 32px-grid, but the visible surface does not.
+// A 1-cell logical boundary owns a 64px-wide visual transition (16px overhang on both sides).
+const EDGE_OVERHANG=16;
+function rand01(x,y,s=0){return (hash2(x+s*977,y+s*1319)&0xffff)/65535}
+function smoothNoise(wx,wy,scale=96,seed=0){
+  const x=wx/scale,y=wy/scale,x0=Math.floor(x),y0=Math.floor(y),fx=x-x0,fy=y-y0;
+  const u=fx*fx*(3-2*fx),v=fy*fy*(3-2*fy);
+  const a=rand01(x0,y0,seed),b=rand01(x0+1,y0,seed),c=rand01(x0,y0+1,seed),d=rand01(x0+1,y0+1,seed);
+  return (a*(1-u)+b*u)*(1-v)+(c*(1-u)+d*u)*v;
+}
+function soilColour(wx,wy,kind){
+  const n=smoothNoise(wx,wy,150,2)*.62+smoothNoise(wx,wy,48,7)*.38;
+  const palettes=kind===0?[[91,43,35],[116,57,43],[137,70,50]]:[[48,34,38],[69,45,43],[83,53,47]];
+  const q=Math.max(0,Math.min(.999,n))*(palettes.length-1),i=Math.floor(q),f=q-i,a=palettes[i],b=palettes[Math.min(i+1,palettes.length-1)];
+  return [a[0]+(b[0]-a[0])*f,a[1]+(b[1]-a[1])*f,a[2]+(b[2]-a[2])*f];
+}
+function rgba(c,a=1){return `rgba(${c[0]|0},${c[1]|0},${c[2]|0},${a})`}
+function drawBaseSurface(g,worldX,worldY,w,h,kind){
+  // 連続した基礎色面。論理32pxグリッドはここには一切出さない。
+  const step=4;for(let yy=0;yy<h;yy+=step)for(let xx=0;xx<w;xx+=step){const c=soilColour(worldX+xx,worldY+yy,kind);g.fillStyle=rgba(c);g.fillRect(xx,yy,step+1,step+1)}
+  // 128px素材は「タイル」ではなく重なり合う質感パッチとして使用。
+  // 元の114pxの細部を拡大せず重ね、地質のまとまりは大域ノイズで維持。
+  const family=kind===0?0:1, spacing=72, size=114;
+  const bx0=Math.floor((worldX-80)/spacing),by0=Math.floor((worldY-80)/spacing),bx1=Math.ceil((worldX+w+80)/spacing),by1=Math.ceil((worldY+h+80)/spacing);
+  for(let by=by0;by<=by1;by++)for(let bx=bx0;bx<=bx1;bx++){
+    const cx=bx*spacing+spacing/2,cy=by*spacing+spacing/2;
+    const macro=fieldNoise(cx/TILE,cy/TILE,18,20+family),detail=fieldNoise(cx/TILE,cy/TILE,7,31+family);
+    const variant=Math.min(7,Math.floor((macro*.72+detail*.28)*8));const tex=terrainPatterns[family*8+variant];if(!tex)continue;
+    const jitterX=((worldHash(bx,by,40+family)&15)-7.5)*2,jitterY=(((worldHash(bx,by,44+family)>>>4)&15)-7.5)*2;
+    const dx=cx-worldX-size/2+jitterX,dy=cy-worldY-size/2+jitterY;g.save();g.imageSmoothingEnabled=false;g.globalAlpha=.96;g.drawImage(tex,dx,dy,size,size);g.restore();
+  }
+}
+function paintFamilyMask(g,cx,cy){
+  // Terrain families are painted through a blurred occupancy mask, never as cell rectangles.
+  const S=CHUNK*TILE,P=40,mask=document.createElement('canvas');mask.width=mask.height=S+P*2;
+  const m=mask.getContext('2d');m.fillStyle='#fff';
+  for(let ly=-2;ly<CHUNK+2;ly++)for(let lx=-2;lx<CHUNK+2;lx++){let x=cx*CHUNK+lx,y=cy*CHUNK+ly;if(x<0||y<0||x>=W||y>=H)continue;let gt=ground[idx(x,y)];if(gt<4)continue;let h=hash2(x,y),jx=((h&7)-3.5)*1.5,jy=(((h>>>4)&7)-3.5)*1.5,r=30+((h>>>8)&15);m.beginPath();m.arc(P+lx*TILE+16+jx,P+ly*TILE+16+jy,r,0,Math.PI*2);m.fill()}
+  const soft=document.createElement('canvas');soft.width=soft.height=S+P*2;const q=soft.getContext('2d');q.filter='blur(26px)';q.drawImage(mask,0,0);q.filter='none';
+  const wet=document.createElement('canvas'),scale=g.canvas.chunkScale||1;wet.width=wet.height=S*scale;const wctx=wet.getContext('2d');wctx.scale(scale,scale);drawBaseSurface(wctx,cx*CHUNK*TILE,cy*CHUNK*TILE,S,S,1);wctx.globalCompositeOperation='destination-in';wctx.drawImage(soft,P,P,S,S,0,0,S,S);wctx.globalCompositeOperation='source-over';g.drawImage(wet,0,0,S,S);
+}
+function edgePath(g,x,y,side,seed){
+  // Boundary deliberately crosses the cell by EDGE_OVERHANG and uses five control samples.
+  const O=EDGE_OVERHANG,pts=[];for(let i=0;i<=4;i++){let t=i/4,j=(rand01(x*7+i,y*11+side,seed)-.5)*12;pts.push([t,j])}
+  g.beginPath();
+  if(side===0){g.moveTo(-O,-O);g.lineTo(TILE+O,-O);for(let i=4;i>=0;i--){let [t,j]=pts[i];g.lineTo(t*TILE,TILE*.18+j)}g.closePath()}
+  if(side===2){g.moveTo(-O,TILE+O);g.lineTo(TILE+O,TILE+O);for(let i=4;i>=0;i--){let [t,j]=pts[i];g.lineTo(t*TILE,TILE*.82+j)}g.closePath()}
+  if(side===3){g.moveTo(-O,-O);g.lineTo(-O,TILE+O);for(let i=4;i>=0;i--){let [t,j]=pts[i];g.lineTo(TILE*.18+j,t*TILE)}g.closePath()}
+  if(side===1){g.moveTo(TILE+O,-O);g.lineTo(TILE+O,TILE+O);for(let i=4;i>=0;i--){let [t,j]=pts[i];g.lineTo(TILE*.82+j,t*TILE)}g.closePath()}
+}
+function drawBoundaryOverhang(g,x,y,px,py,gt){
+  const ns=[[0,-1,0],[1,0,1],[0,1,2],[-1,0,3]];g.save();g.translate(px,py);
+  for(const [dx,dy,side] of ns){let nx=x+dx,ny=y+dy;if(nx<0||ny<0||nx>=W||ny>=H)continue;let nt=ground[idx(nx,ny)];if(nt===gt)continue;
+    // only render the visually dominant neighbour once; two wide translucent passes make a band, not a line.
+    let c=soilColour((x+.5)*TILE,(y+.5)*TILE,nt>=4?1:0);edgePath(g,x,y,side,13);g.fillStyle=rgba(c,.22);g.fill();
+    g.save();g.globalAlpha=.28;g.translate(side===1?4:side===3?-4:0,side===2?4:side===0?-4:0);edgePath(g,x,y,side,29);g.fillStyle=rgba(c,.30);g.fill();g.restore();
+  }g.restore();
+}
+function drawEdgeVegetation(g,x,y,px,py,gt){
+  // Foreground-looking tufts sit on selected boundaries and may extend outside the cell.
+  if(gt>=6)return;let h=hash2(x*5+41,y*7+83);if(h%100>18)return;let side=(h>>>8)%4,ox=side===1?30:side===3?2:6+(h%20),oy=side===2?31:side===0?2:8+((h>>>5)%17);
+  g.save();g.translate(px+ox,py+oy);g.strokeStyle='rgba(65,34,28,.58)';g.lineWidth=1.4;for(let i=0;i<3;i++){let a=-1.9+i*.55+((h>>>i)&3)*.08,l=5+((h>>>(i+9))&3);g.beginPath();g.moveTo(0,1);g.lineTo(Math.cos(a)*l,Math.sin(a)*l);g.stroke()}g.restore();
+}
+function drawTerrainDecals(g,cx,cy){
+  const worldX=cx*CHUNK*TILE,worldY=cy*CHUNK*TILE;
+  // Sparse multi-cell cracks/pebbles. Positions are chunk-based, never one per tile.
+  for(let i=0;i<24;i++){let h=hash2(cx*101+i,cy*173+i*7),x=(h% (CHUNK*TILE-40))+20,y=((h>>>9)%(CHUNK*TILE-40))+20;if(h%100<45){g.save();g.translate(x,y);g.rotate(((h>>>18)%628)/100);g.strokeStyle='rgba(35,17,17,.22)';g.lineWidth=1.2;g.beginPath();g.moveTo(-8,0);g.lineTo(-2,-2);g.lineTo(3,2);g.lineTo(9,-1);g.stroke();g.restore()}else if(h%100<65){g.fillStyle='rgba(36,21,20,.20)';g.beginPath();g.ellipse(x,y,2+(h%4),1+((h>>>5)%3),0,0,Math.PI*2);g.fill()}}
+}
+
+function drawOrganicGroundDetails(g,cx,cy){
+  // Large, sparse detail clusters cross logical cells so the surface reads as one landscape.
+  const S=CHUNK*TILE;
+  for(let i=0;i<18;i++){
+    const h=hash2(cx*313+i*29,cy*271+i*43), x=18+(h%(S-36)), y=18+((h>>>9)%(S-36));
+    const worldTx=Math.max(0,Math.min(W-1,Math.floor((cx*CHUNK*TILE+x)/TILE)));
+    const worldTy=Math.max(0,Math.min(H-1,Math.floor((cy*CHUNK*TILE+y)/TILE)));
+    const wet=ground[idx(worldTx,worldTy)]>=4;
+    if((h%100)<34){
+      g.save();g.translate(x,y);g.rotate(((h>>>18)%628)/100);
+      g.strokeStyle=wet?'rgba(25,17,20,.17)':'rgba(46,20,16,.20)';g.lineWidth=1.1;
+      g.beginPath();g.moveTo(-14,0);g.lineTo(-7,-3);g.lineTo(-1,1);g.lineTo(5,-2);g.lineTo(13,2);g.stroke();
+      if((h>>>5)%3===0){g.beginPath();g.moveTo(-2,1);g.lineTo(1,7);g.lineTo(5,10);g.stroke()}
+      g.restore();
+    } else if((h%100)<61){
+      g.fillStyle=wet?'rgba(74,52,48,.22)':'rgba(83,42,31,.20)';
+      const n=3+((h>>>4)%5);for(let j=0;j<n;j++){let a=((h>>>j)%628)/100,r=4+((h>>>(j+8))%14);g.beginPath();g.ellipse(x+Math.cos(a)*r,y+Math.sin(a)*r,1+((h>>>(j+12))%3),.8+((h>>>(j+15))%2),a,0,Math.PI*2);g.fill()}
+    }
+  }
+}
+function drawBoundaryScatter(g,cx,cy){
+  // Break the remaining geometric edge with dirt crumbs and dry tufts that straddle both sides.
+  for(let ly=1;ly<CHUNK-1;ly++)for(let lx=1;lx<CHUNK-1;lx++){
+    const x=cx*CHUNK+lx,y=cy*CHUNK+ly,gt=ground[idx(x,y)],h=hash2(x*17,y*23);
+    if(h%100>22)continue;
+    const neigh=[[0,-1],[1,0],[0,1],[-1,0]].filter(([dx,dy])=>ground[idx(x+dx,y+dy)]!==gt);
+    if(!neigh.length)continue; const [dx,dy]=neigh[(h>>>7)%neigh.length];
+    let px=lx*TILE+16+dx*15+(((h>>>11)%9)-4),py=ly*TILE+16+dy*15+(((h>>>15)%9)-4);
+    g.fillStyle=gt>=4?'rgba(91,54,46,.30)':'rgba(52,29,25,.28)';
+    for(let k=0;k<3;k++){let ox=((h>>>(k*3))&7)-3,oy=((h>>>(k*3+2))&7)-3;g.beginPath();g.ellipse(px+ox,py+oy,1.5+(k&1),1,0,0,Math.PI*2);g.fill()}
+    if((h>>>20)&1){g.strokeStyle='rgba(58,31,25,.35)';g.lineWidth=1;for(let k=0;k<2;k++){g.beginPath();g.moveTo(px,py+2);g.lineTo(px-4+k*8,py-5-((h>>>k)&3));g.stroke()}}
+  }
+}
+
+function chunkCanvas(cx,cy){const scale=cam.zoom*DPR>=1.2?2:1;let key=cx+','+cy,c=chunks.get(key);if(!c){c=document.createElement('canvas');chunks.set(key,c)}if(c.chunkScale!==scale){c.chunkScale=scale;c.width=c.height=CHUNK*TILE*scale;dirty.add(key)}if(dirty.has(key)){let g=c.getContext('2d');g.setTransform(1,0,0,1,0,0);g.clearRect(0,0,c.width,c.height);g.setTransform(scale,0,0,scale,0,0);g.imageSmoothingEnabled=true;g.imageSmoothingQuality="high";
+  const wx=cx*CHUNK*TILE,wy=cy*CHUNK*TILE;drawBaseSurface(g,wx,wy,CHUNK*TILE,CHUNK*TILE,0);
+  // Paint wet/dark terrain as one continuous field. The simulation grid remains untouched.
+  paintFamilyMask(g,cx,cy);
+  // v0.0.8: no continuous edge veil. The blurred family mask itself forms a broad transition zone;
+  // sparse cross-boundary decals below break the remaining silhouette without drawing a visible border line.
+  drawTerrainDecals(g,cx,cy);drawOrganicGroundDetails(g,cx,cy);drawBoundaryScatter(g,cx,cy);
+  for(let ly=0;ly<CHUNK;ly++)for(let lx=0;lx<CHUNK;lx++){let x=cx*CHUNK+lx,y=cy*CHUNK+ly;if(x>=W||y>=H)continue;let px=lx*TILE,py=ly*TILE,gt=ground[idx(x,y)];drawEdgeVegetation(g,x,y,px,py,gt);let b=build[idx(x,y)];if(floors[idx(x,y)]&&buildingAtlas.complete&&buildingAtlas.naturalWidth){if(!floorMaterial)rebuildFloorMaterial();floorMaterial.setTransform(new DOMMatrix().translate(-wx,-wy).scale(.25));g.fillStyle=floorMaterial;g.fillRect(px,py,TILE,TILE)}}dirty.delete(key)}return c}
+function drawWorld(){ctx.imageSmoothingEnabled=true;ctx.imageSmoothingQuality="high";let vw=innerWidth/cam.zoom,vh=innerHeight/cam.zoom,minx=Math.max(0,Math.floor((cam.x-vw/2)/TILE/CHUNK)),maxx=Math.min(Math.ceil(W/CHUNK)-1,Math.floor((cam.x+vw/2)/TILE/CHUNK)),miny=Math.max(0,Math.floor((cam.y-vh/2)/TILE/CHUNK)),maxy=Math.min(Math.ceil(H/CHUNK)-1,Math.floor((cam.y+vh/2)/TILE/CHUNK));const visible=new Set();for(let cy=miny;cy<=maxy;cy++)for(let cx=minx;cx<=maxx;cx++){const key=cx+','+cy;visible.add(key);const chunk=chunkCanvas(cx,cy);ctx.imageSmoothingEnabled=true;ctx.drawImage(chunk,cx*CHUNK*TILE,cy*CHUNK*TILE,CHUNK*TILE,CHUNK*TILE)}for(const key of chunks.keys()){if(chunks.size<=Math.max(24,visible.size))break;if(!visible.has(key))chunks.delete(key)}}
+function drawWaterFx(t){let vw=innerWidth/cam.zoom,vh=innerHeight/cam.zoom,minx=Math.max(0,Math.floor((cam.x-vw/2)/TILE)-1),maxx=Math.min(W-1,Math.ceil((cam.x+vw/2)/TILE)+1),miny=Math.max(0,Math.floor((cam.y-vh/2)/TILE)-1),maxy=Math.min(H-1,Math.ceil((cam.y+vh/2)/TILE)+1);ctx.lineWidth=.7;for(let y=miny;y<=maxy;y++)for(let x=minx;x<=maxx;x++){let gt=ground[idx(x,y)];if(gt!==6&&gt!==7)continue;let h=hash2(x,y);if(h%7)continue;let phase=(t*.00035+(h%100)/100)%1,yy=y*TILE+8+phase*16;ctx.globalAlpha=gt===6?.12:.08;ctx.strokeStyle=gt===6?'#e2b8aa':'#ad80bb';ctx.beginPath();ctx.moveTo(x*TILE+4,yy);ctx.quadraticCurveTo(x*TILE+16,yy-1.5,x*TILE+28,yy);ctx.stroke()}ctx.globalAlpha=1}
+// Visual separation lives in the renderer; original atlases remain untouched.
+const separationStyle={outline:'#2b1922',outlineAlpha:.78,screenRadius:.85};
+const silhouetteCache=new Map(),outlineCache=new Map();
+function silhouette(image,sx,sy,sw,sh,w,h){
+ const key=[image.src,sx,sy,sw,sh,w,h].join(':');let result=silhouetteCache.get(key);if(result)return result;
+ const scale=4,pad=10,c=document.createElement('canvas');c.width=Math.ceil(w*scale)+pad*2;c.height=Math.ceil(h*scale)+pad*2;
+ const g=c.getContext('2d',{willReadFrequently:true});g.drawImage(image,sx,sy,sw,sh,pad,pad,w*scale,h*scale);
+ const data=g.getImageData(0,0,c.width,c.height),pixels=data.data,N=c.width*c.height,outside=new Uint8Array(N),queue=new Int32Array(N);let head=0,tail=1;queue[0]=0;outside[0]=1;
+ // Fill enclosed transparent holes in the silhouette used for the outer ring.
+ // The actual sprite is never edited, so its interior transparency stays intact.
+ while(head<tail){const k=queue[head++],x=k%c.width,y=(k/c.width)|0;for(const[dx,dy]of[[1,0],[-1,0],[0,1],[0,-1]]){const xx=x+dx,yy=y+dy;if(xx<0||yy<0||xx>=c.width||yy>=c.height)continue;const n=yy*c.width+xx;if(outside[n]||pixels[n*4+3]>20)continue;outside[n]=1;queue[tail++]=n}}
+ for(let i=0;i<N;i++){pixels[i*4]=43;pixels[i*4+1]=25;pixels[i*4+2]=34;pixels[i*4+3]=outside[i]?0:255}g.putImageData(data,0,0);result={key,c,scale,pad};silhouetteCache.set(key,result);return result;
+}
+function drawOutlinedSprite(image,sx,sy,sw,sh,x,y,w,h){
+ if(!image.complete||!image.naturalWidth)return;
+ const m=silhouette(image,sx,sy,sw,sh,w,h),radius=Math.max(1,Math.min(8,Math.round(separationStyle.screenRadius/cam.zoom*m.scale))),key=m.key+':'+radius+':'+separationStyle.outline;
+ let ring=outlineCache.get(key);if(!ring){ring=document.createElement('canvas');ring.width=m.c.width;ring.height=m.c.height;const g=ring.getContext('2d');for(let i=0;i<16;i++){const angle=i*Math.PI/8;g.drawImage(m.c,Math.cos(angle)*radius,Math.sin(angle)*radius)}g.globalCompositeOperation='destination-out';g.drawImage(m.c,0,0);g.globalCompositeOperation='source-in';g.fillStyle=separationStyle.outline;g.fillRect(0,0,ring.width,ring.height);outlineCache.set(key,ring)}
+ ctx.save();ctx.globalAlpha*=separationStyle.outlineAlpha;ctx.imageSmoothingEnabled=true;ctx.drawImage(ring,x-m.pad/m.scale,y-m.pad/m.scale,ring.width/m.scale,ring.height/m.scale);ctx.restore();ctx.drawImage(image,sx,sy,sw,sh,x,y,w,h);
+}
+const contactShadow=document.createElement('canvas');contactShadow.width=128;contactShadow.height=32;
+{const g=contactShadow.getContext('2d');g.scale(1,.25);const shade=g.createRadialGradient(64,64,3,64,64,64);shade.addColorStop(0,'rgba(25,12,20,.38)');shade.addColorStop(.5,'rgba(25,12,20,.19)');shade.addColorStop(1,'rgba(25,12,20,0)');g.fillStyle=shade;g.fillRect(0,0,128,128)}
+const wallContactShadow=document.createElement('canvas');wallContactShadow.width=1;wallContactShadow.height=32;
+{const g=wallContactShadow.getContext('2d'),shade=g.createLinearGradient(0,0,0,32);shade.addColorStop(0,'rgba(25,12,20,.34)');shade.addColorStop(1,'rgba(25,12,20,0)');g.fillStyle=shade;g.fillRect(0,0,1,32)}
+function drawContactShadows(){
+ const vw=innerWidth/cam.zoom,vh=innerHeight/cam.zoom,minx=Math.max(0,Math.floor((cam.x-vw/2)/TILE)-4),maxx=Math.min(W-1,Math.ceil((cam.x+vw/2)/TILE)+4),miny=Math.max(0,Math.floor((cam.y-vh/2)/TILE)-4),maxy=Math.min(H-1,Math.ceil((cam.y+vh/2)/TILE)+4);
+ ctx.save();ctx.imageSmoothingEnabled=true;for(let y=miny;y<=maxy;y++)for(let x=minx;x<=maxx;x++){const b=build[idx(x,y)],foot=(y+1)*TILE;if(b===2&&!isWall(x,y+1))ctx.drawImage(wallContactShadow,x*TILE,foot-.5,TILE,5);else if(b>=3&&b<=5)ctx.drawImage(contactShadow,x*TILE,y*TILE+29,TILE,7);if(resourceAt(x,y))ctx.drawImage(contactShadow,x*TILE-8,foot-4,48,9)}for(const d of drops)if(d.x>=minx&&d.x<=maxx&&d.y>=miny&&d.y<=maxy)ctx.drawImage(contactShadow,d.x*TILE+5,(d.y+1)*TILE-2,22,4);ctx.drawImage(contactShadow,nico.rx+5,nico.ry+29,22,6);ctx.restore();
+}
+const RESOURCE_SPRITES=[{sx:0,sy:0,sw:256,sh:256,w:90,h:90},{sx:256,sy:0,sw:256,sh:256,w:26,h:26},{sx:512,sy:0,sw:256,sh:256,w:26,h:26}];
+function drawResource(r){drawResourceSprite(r.x,r.y,0)}
+function drawResourceSprite(x,y,type,qty=0){if(!resourceAtlas.complete||!resourceAtlas.naturalWidth)return;const a=RESOURCE_SPRITES[type];drawOutlinedSprite(resourceAtlas,a.sx,a.sy,a.sw,a.sh,x*TILE+16-a.w/2,(y+1)*TILE-a.h,a.w,a.h);if(qty&&cam.zoom>.65){ctx.font='9px system-ui';ctx.fillStyle='#fff0db';ctx.strokeStyle='#241018';ctx.lineWidth=2;ctx.strokeText(qty,x*TILE+22,y*TILE+30);ctx.fillText(qty,x*TILE+22,y*TILE+30)}}
+function drawNico(t){let x=nico.rx+16,y=nico.ry+16;const hit=Math.max(0,((nico.hitUntil||0)-simTime)/.16),shake=hit*Math.sin(hit*12)*1.8;x+=shake;y-=Math.sin(hit*Math.PI)*.9;if(nico.selected){ctx.strokeStyle='#ffe07a';ctx.lineWidth=2;ctx.beginPath();ctx.ellipse(x,y+13,17,7,0,0,Math.PI*2);ctx.stroke()}if(atlas.complete&&atlas.naturalWidth){let row={S:0,N:1,W:2,E:2}[nico.dir],frame=nico.moving?Math.floor(nico.walkDistance/8)%4:1;ctx.save();ctx.translate(x,y);ctx.scale(nico.dir==='E'?-1:1,1);ctx.imageSmoothingEnabled=false;drawOutlinedSprite(atlas,frame*32,row*40,32,40,-16,-24,32,40);ctx.restore()}if(nico.carry){const a=RESOURCE_SPRITES[nico.carry.type+1];drawOutlinedSprite(resourceAtlas,a.sx,a.sy,a.sw,a.sh,x-10,y-8,20,16)}}
+// Wall material regions: top (0,512,512,512), cliff (512,512,512,512).
+// Foot Y never moves. Only the visual surface is raised by WALL_HEIGHT.
+const WALL_HEIGHT=24;
+let wallMaterials=null;
+let plannedWalls=new Set();
+function rebuildWallMaterials(){
+ if(!buildingAtlas.complete||!buildingAtlas.naturalWidth)return;
+ const surface=document.createElement('canvas');surface.width=surface.height=1024;
+ const face=document.createElement('canvas');face.width=1024;face.height=512;
+ const a=surface.getContext('2d'),b=face.getContext('2d');
+ // Mirrored repeats meet with identical edge texels, without dark gutters.
+ for(let y=0;y<2;y++)for(let x=0;x<2;x++){
+  a.save();a.translate(x?1024:0,y?1024:0);a.scale(x?-1:1,y?-1:1);
+  a.drawImage(buildingAtlas,0,512,512,512,0,0,512,512);a.restore();
+ }
+ for(let x=0;x<2;x++){
+  b.save();b.translate(x?1024:0,0);b.scale(x?-1:1,1);
+  b.drawImage(buildingAtlas,512,512,512,512,0,0,512,512);b.restore();
+ }
+ // Overlapping native-resolution patches break reflected landmarks. Wrapped
+ // stamps keep the material field continuous at its periodic boundaries.
+ const hash=(x,y)=>{let v=Math.imul(x+31,374761393)^Math.imul(y+17,668265263);v=Math.imul(v^(v>>>13),1274126177);return (v^(v>>>16))>>>0};
+ const patch=document.createElement('canvas');patch.width=patch.height=384;
+ const pg=patch.getContext('2d');
+ for(let iy=0;iy<8;iy++)for(let ix=0;ix<8;ix++){
+  const h=hash(ix,iy),cx=ix*128+(h%41)-20,cy=iy*128+((h>>>8)%41)-20;
+  pg.clearRect(0,0,384,384);pg.save();pg.translate(192,192);pg.rotate((h%4)*Math.PI/2);
+  pg.drawImage(buildingAtlas,h%129,512+((h>>>8)%129),384,384,-192,-192,384,384);pg.restore();
+  pg.globalCompositeOperation='destination-in';
+  const fade=pg.createRadialGradient(192,192,65,192,192,192);
+  fade.addColorStop(0,'rgba(255,255,255,.96)');fade.addColorStop(.65,'rgba(255,255,255,.8)');fade.addColorStop(1,'rgba(255,255,255,0)');
+  pg.fillStyle=fade;pg.fillRect(0,0,384,384);pg.globalCompositeOperation='source-over';
+  for(const ox of [-1024,0,1024])for(const oy of [-1024,0,1024])a.drawImage(patch,cx-192+ox,cy-192+oy);
+ }
+ const strip=document.createElement('canvas');strip.width=256;strip.height=512;
+ const fg=strip.getContext('2d');
+ for(let i=0;i<8;i++){
+  const h=hash(i,91),cx=i*128+(h%33)-16;fg.clearRect(0,0,256,512);
+  fg.drawImage(buildingAtlas,512+h%257,512,256,512,0,0,256,512);
+  fg.globalCompositeOperation='destination-in';const fade=fg.createLinearGradient(0,0,256,0);
+  fade.addColorStop(0,'rgba(255,255,255,0)');fade.addColorStop(.25,'rgba(255,255,255,.92)');
+  fade.addColorStop(.75,'rgba(255,255,255,.92)');fade.addColorStop(1,'rgba(255,255,255,0)');
+  fg.fillStyle=fade;fg.fillRect(0,0,256,512);fg.globalCompositeOperation='source-over';
+  for(const ox of [-1024,0,1024])b.drawImage(strip,cx-128+ox,0);
+ }
+ const top=ctx.createPattern(surface,'repeat'),cliff=ctx.createPattern(face,'repeat');
+ top.setTransform(new DOMMatrix().translate(0,-WALL_HEIGHT).scale(.5));
+ cliff.setTransform(new DOMMatrix().scale(.35));
+ const shadow=document.createElement('canvas');shadow.width=1;shadow.height=128;
+ const sg=shadow.getContext('2d'),shade=sg.createLinearGradient(0,0,0,128);
+ shade.addColorStop(0,'rgba(25,9,8,.12)');shade.addColorStop(.65,'rgba(25,9,8,.22)');shade.addColorStop(1,'rgba(25,9,8,.48)');
+ sg.fillStyle=shade;sg.fillRect(0,0,1,128);wallMaterials={top,cliff,shadow};
+}
+function isWall(x,y){return x>=0&&y>=0&&x<W&&y<H&&build[idx(x,y)]===2}
+function wallMask(x,y,planned=false){
+ const at=(a,b)=>isWall(a,b)||(planned&&plannedWalls.has(a+','+b));
+ return (at(x,y-1)?1:0)|(at(x+1,y)?2:0)|(at(x,y+1)?4:0)|(at(x-1,y)?8:0)
+  |(at(x-1,y-1)?16:0)|(at(x+1,y-1)?32:0)|(at(x+1,y+1)?64:0)|(at(x-1,y+1)?128:0);
+}
+function drawWallCell(x,y,planned=false){
+ if(!wallMaterials){rebuildWallMaterials();if(!wallMaterials)return}
+ const px=x*TILE,py=y*TILE-WALL_HEIGHT,foot=(y+1)*TILE,m=wallMask(x,y,planned);
+ const n=!!(m&1),e=!!(m&2),s=!!(m&4),w=!!(m&8),c=2;
+ ctx.save();ctx.imageSmoothingEnabled=true;
+ // A continuous world-space material covers every connected cell; borders
+ // only exist against empty terrain, never between wall cells.
+ ctx.beginPath();ctx.moveTo(px+(!n&&!w?c:0),py);
+ ctx.lineTo(px+TILE-(!n&&!e?c:0),py);ctx.lineTo(px+TILE,py+(!n&&!e?c:0));
+ ctx.lineTo(px+TILE,py+TILE-(!s&&!e?c:0));
+ ctx.lineTo(px+TILE-(!s&&!e?c:0),py+TILE);
+ ctx.lineTo(px+(!s&&!w?c:0),py+TILE);ctx.lineTo(px,py+TILE-(!s&&!w?c:0));
+ ctx.lineTo(px,py+(!n&&!w?c:0));ctx.closePath();
+ ctx.fillStyle=wallMaterials.top;ctx.fill();
+ if(!s){
+  // Exposed front face occupies [foot-height, foot]. It never extends below foot.
+  ctx.beginPath();ctx.moveTo(px,py+TILE-(!w?c:0));ctx.lineTo(px+(!w?c:0),py+TILE);
+  ctx.lineTo(px+TILE-(!e?c:0),py+TILE);ctx.lineTo(px+TILE,py+TILE-(!e?c:0));
+  ctx.lineTo(px+TILE,foot);ctx.lineTo(px,foot);ctx.closePath();
+  ctx.fillStyle=wallMaterials.cliff;ctx.fill();
+  ctx.save();ctx.clip();
+  ctx.drawImage(wallMaterials.shadow,px,foot-WALL_HEIGHT-c,TILE,WALL_HEIGHT+c);ctx.restore();
+ }
+ // Subtle rim highlights use only exposed edges, including concave corners.
+ ctx.strokeStyle='rgba(216,137,96,.32)';ctx.lineWidth=1;
+ ctx.beginPath();
+ if(!n){ctx.moveTo(px+(!w?c:0),py+.5);ctx.lineTo(px+TILE-(!e?c:0),py+.5)}
+ if(!s){ctx.moveTo(px+(!w?c:0),py+TILE-.5);ctx.lineTo(px+TILE-(!e?c:0),py+TILE-.5)}
+ if(!w){ctx.moveTo(px+.5,py+(!n?c:0));ctx.lineTo(px+.5,py+TILE-(!s?c:0))}
+ if(!e){ctx.moveTo(px+TILE-.5,py+(!n?c:0));ctx.lineTo(px+TILE-.5,py+TILE-(!s?c:0))}
+ // Missing diagonals are actual inner corners, not four-neighbour guesses.
+ if(n&&w&&!(m&16)){ctx.moveTo(px,py+2);ctx.lineTo(px+2,py)}
+ if(n&&e&&!(m&32)){ctx.moveTo(px+TILE-2,py);ctx.lineTo(px+TILE,py+2)}
+ if(s&&e&&!(m&64)){ctx.moveTo(px+TILE,py+TILE-2);ctx.lineTo(px+TILE-2,py+TILE)}
+ if(s&&w&&!(m&128)){ctx.moveTo(px+2,py+TILE);ctx.lineTo(px,py+TILE-2)}
+ ctx.stroke();
+ ctx.strokeStyle=separationStyle.outline;ctx.globalAlpha*=separationStyle.outlineAlpha;ctx.lineWidth=Math.max(.35,Math.min(2,separationStyle.screenRadius/cam.zoom));ctx.lineJoin='round';ctx.lineCap='round';ctx.beginPath();
+ if(!n){ctx.moveTo(px+(!w?c:0),py);ctx.lineTo(px+TILE-(!e?c:0),py)}
+ if(!w){ctx.moveTo(px+(!n?c:0),py);if(!n)ctx.lineTo(px,py+c);ctx.lineTo(px,s?py+TILE:foot)}
+ if(!e){ctx.moveTo(px+TILE-(!n?c:0),py);if(!n)ctx.lineTo(px+TILE,py+c);ctx.lineTo(px+TILE,s?py+TILE:foot)}
+ if(!s){ctx.moveTo(px,foot);ctx.lineTo(px+TILE,foot)}
+ ctx.stroke();ctx.restore();
+}
+
+let floorMaterial=null;
+function rebuildFloorMaterial(){
+ if(!buildingAtlas.complete||!buildingAtlas.naturalWidth)return;
+ const c=document.createElement('canvas');c.width=c.height=512;const g=c.getContext('2d');
+ for(let y=0;y<2;y++)for(let x=0;x<2;x++){
+  g.save();g.translate(x?512:0,y?512:0);g.scale(x?-1:1,y?-1:1);
+  g.drawImage(buildingAtlas,0,0,256,256,0,0,256,256);g.restore();
+ }
+ floorMaterial=ctx.createPattern(c,'repeat');
+}
+const BUILD_SPRITES={5:{sx:256,sy:256,sw:256,sh:256,w:36,h:36},6:{sx:0,sy:256,sw:207,sh:256,w:38,h:47},7:{sx:512,sy:256,sw:207,sh:256,w:38,h:47},3:{sx:280,sy:0,sw:207,sh:256,w:38,h:47},4:{sx:554,sy:0,sw:172,sh:256,w:34,h:51}};
+function drawBuildingCell(x,y,b){
+ if(!buildingAtlas.complete||!buildingAtlas.naturalWidth)return;
+ if(b===2){drawWallCell(x,y);return}
+ const r=BUILD_SPRITES[b];if(!r)return;
+ ctx.save();ctx.imageSmoothingEnabled=true;ctx.imageSmoothingQuality='high';
+ if(b===3){const baseAlpha=ctx.globalAlpha,d=doors.get(idx(x,y)),p=d?d.progress:0,q=p*2;const frames=[BUILD_SPRITES[3],BUILD_SPRITES[7],BUILD_SPRITES[6]],i=Math.min(2,Math.floor(q)),f=q-i;for(const[a,alpha]of[[frames[i],1-f],[frames[Math.min(2,i+1)],f]]){if(!alpha)continue;ctx.globalAlpha=baseAlpha*alpha;drawOutlinedSprite(buildingAtlas,a.sx,a.sy,a.sw,a.sh,x*TILE+16-a.w/2,(y+1)*TILE-a.h,a.w,a.h)}}else drawOutlinedSprite(buildingAtlas,r.sx,r.sy,r.sw,r.sh,x*TILE+16-r.w/2,(y+1)*TILE-r.h,r.w,r.h);ctx.restore();
+}
+function drawBlueprint(j){
+ const px=j.x*TILE,py=j.y*TILE;ctx.save();
+ if(j.type==='build'){
+  ctx.globalAlpha=.35;
+  if(j.buildType===2)drawWallCell(j.x,j.y,true);
+  else if(j.buildType===3||j.buildType===4||j.buildType===5)drawBuildingCell(j.x,j.y,j.buildType);
+  else if(j.buildType===1&&floorMaterial){floorMaterial.setTransform(new DOMMatrix().scale(.25));ctx.fillStyle=floorMaterial;ctx.fillRect(px,py,TILE,TILE)}
+ }
+ ctx.globalAlpha=.6;ctx.strokeStyle=j.type==='mine'?'#ffcf7a':'#9fe7ff';ctx.lineWidth=1.5;ctx.setLineDash([4,3]);ctx.strokeRect(px+2,py+2,28,28);ctx.restore();
+}
+function drawWorkFx(t){if(!nico.job||nico.path.length||nico.job.type==='pickup'||nico.job.type==='deliver')return;const j=nico.job,x=j.x*TILE+16,y=j.y*TILE+14;ctx.save();ctx.globalAlpha=.55+.35*Math.sin(t*.025);ctx.fillStyle='#ffd37a';for(let i=0;i<3;i++){let a=t*.01+i*2.1;ctx.fillRect(x+Math.cos(a)*8,y+Math.sin(a)*6,2,2)}ctx.restore()}
+function drawDepthSorted(t){let vw=innerWidth/cam.zoom,vh=innerHeight/cam.zoom,minx=Math.max(0,Math.floor((cam.x-vw/2)/TILE)-5),maxx=Math.min(W-1,Math.ceil((cam.x+vw/2)/TILE)+5),miny=Math.max(0,Math.floor((cam.y-vh/2)/TILE)-7),maxy=Math.min(H-1,Math.ceil((cam.y+vh/2)/TILE)+3);plannedWalls=new Set(jobs.filter(j=>j.type==='build'&&j.buildType===2).map(j=>j.x+','+j.y));let list=[];for(let y=miny;y<=maxy;y++)for(let x=minx;x<=maxx;x++){let b=build[idx(x,y)];if(b===2||b===3||b===4||b===5)list.push({y:(y+1)*TILE,type:0,x,y0:y,b});const r=resourceAt(x,y);if(r)list.push({y:(y+1)*TILE,type:1,r})}for(const d of drops)if(d.x>=minx&&d.x<=maxx&&d.y>=miny&&d.y<=maxy)list.push({y:(d.y+1)*TILE,type:4,d});list.push({y:nico.ry+TILE,type:2});for(const j of jobs)if(j.x>=minx&&j.x<=maxx&&j.y>=miny&&j.y<=maxy)list.push({y:(j.y+1)*TILE,type:3,j});const rank=[0,1,3,2,1];list.sort((a,b)=>a.y-b.y||rank[a.type]-rank[b.type]);for(const o of list){if(o.type===0)drawBuildingCell(o.x,o.y0,o.b);else if(o.type===1)drawResource(o.r);else if(o.type===2)drawNico(t);else if(o.type===4)drawResourceSprite(o.d.x,o.d.y,o.d.type+1,o.d.qty);else drawBlueprint(o.j)}drawWorkFx(t)}
+function drawZones(){if(menu!=='zones'&&!zoneEditor&&!nico.selected)return;const viewW=innerWidth/cam.zoom,viewH=innerHeight/cam.zoom;ctx.save();for(const z of zones){if(z.x1*TILE<cam.x-viewW/2||z.x0*TILE>cam.x+viewW/2||z.y1*TILE<cam.y-viewH/2||z.y0*TILE>cam.y+viewH/2)continue;ctx.fillStyle=z.kind==='stock'?'#78bca719':z.kind==='area'?'#78a9ef16':'#debf8810';ctx.strokeStyle=z.kind==='stock'?'#83d6bbaa':z.kind==='area'?'#8dbbff99':'#debf8866';ctx.lineWidth=1/cam.zoom;ctx.setLineDash([4/cam.zoom,4/cam.zoom]);ctx.fillRect(z.x0*TILE,z.y0*TILE,(z.x1-z.x0+1)*TILE,(z.y1-z.y0+1)*TILE);ctx.strokeRect(z.x0*TILE,z.y0*TILE,(z.x1-z.x0+1)*TILE,(z.y1-z.y0+1)*TILE)}if(zoneDrag){const z=zoneDrag;ctx.setLineDash([]);ctx.strokeStyle='#9fe7ff';ctx.strokeRect(Math.min(z.x,z.ex)*TILE,Math.min(z.y,z.ey)*TILE,(Math.abs(z.x-z.ex)+1)*TILE,(Math.abs(z.y-z.ey)+1)*TILE)}ctx.restore()}
+function frame(t){const dt=Math.min(.04,(t-(frame.last||t))/1000);frame.last=t;const pan=520*dt/cam.zoom;if(keys.has('w')||keys.has('arrowup'))cam.y-=pan;if(keys.has('s')||keys.has('arrowdown'))cam.y+=pan;if(keys.has('a')||keys.has('arrowleft'))cam.x-=pan;if(keys.has('d')||keys.has('arrowright'))cam.x+=pan;if(!paused){simTime+=dt*speed;stepNico(dt*speed)}ctx.setTransform(DPR,0,0,DPR,0,0);ctx.fillStyle='#170f13';ctx.fillRect(0,0,innerWidth,innerHeight);ctx.translate(innerWidth/2,innerHeight/2);ctx.scale(cam.zoom,cam.zoom);ctx.translate(-cam.x,-cam.y);drawWorld();drawWaterFx(t);drawContactShadows();drawZones();drawDepthSorted(t);ctx.setTransform(DPR,0,0,DPR,0,0);if(!frame.uiAt||t-frame.uiAt>150){frame.uiAt=t;document.getElementById('status').textContent=`${paused?'⏸ 一時停止':'▶ '+speed+'x'} / map ${W}×${H} / zoom ${cam.zoom.toFixed(2)}x / jobs ${jobs.length}`;document.getElementById('panel').classList.toggle('show',nico.selected||!!nico.job);document.getElementById('nicoState').textContent=nico.state;const c=inventoryCounts();for(let i=0;i<2;i++)document.getElementById('stock'+i).textContent=c[i]}requestAnimationFrame(frame)}requestAnimationFrame(frame);
+</script></body></html>
